@@ -1,0 +1,14 @@
+{application, netdata,
+ [
+  {description, "An Erlang netdata library"},
+  {vsn, "1"},
+  {modules, [
+             netdata
+            ]},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {env, []}
+ ]}.
