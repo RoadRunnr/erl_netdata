@@ -9,7 +9,7 @@
 -export([start_link/0]).
 
 %% gen_statem callbacks
--export([init/1, terminate/3, code_change/4]).
+-export([callback_mode/0, init/1, terminate/3, code_change/4]).
 -export([connect/3, reporting/3]).
 
 -define(SERVER, ?MODULE).
@@ -33,17 +33,18 @@ start_link() ->
 %%% gen_statem callbacks
 %%%===================================================================
 
+-spec callback_mode() -> gen_statem:callback_mode().
+callback_mode() -> state_functions.
+
 -spec init(Args :: term()) ->
-		  {gen_statem:callback_mode(),
-		   State :: term(), Data :: term()} |
-		  {gen_statem:callback_mode(),
-		   State :: term(), Data :: term(),
+		  {ok, State :: term(), Data :: term()} |
+		  {ok, State :: term(), Data :: term(),
 		   [gen_statem:action()] | gen_statem:action()} |
 		  ignore |
 		  {stop, Reason :: term()}.
 init([]) ->
     io:format("netdata started~n"),
-    {state_functions, connect, #state{timeout = ?DEFAULT_TIMEOUT}, [{timeout, 0, reconnect}]}.
+    {ok, connect, #state{timeout = ?DEFAULT_TIMEOUT}, [{timeout, 0, reconnect}]}.
 
 -spec connect(
 	gen_statem:event_type(), Msg :: term(),
