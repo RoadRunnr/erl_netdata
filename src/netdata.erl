@@ -118,21 +118,21 @@ report(Interval) ->
 init_active_tasks(Cnt, Cnt, Acc) ->
     Acc;
 init_active_tasks(Cnt, Max, Acc) ->
-    Chart = io_lib:format("CHART erlang.active_tasks_~w '' \\\"Active Tasks #~w\\\" \\\"number\\\"", [Cnt + 1, Cnt + 1]),
+    Chart = io_lib:format("CHART erlang.active_tasks_~w '' \"Active Tasks #~w\" \"number\"", [Cnt + 1, Cnt + 1]),
     Dim = io_lib:format("DIMENSION active_tasks_~w '' absolute 1 1", [Cnt + 1]),
     init_active_tasks(Cnt + 1, Max, [Chart, Dim | Acc]).
 
 init_run_queue_lengths(Cnt, Cnt, Acc) ->
     Acc;
 init_run_queue_lengths(Cnt, Max, Acc) ->
-    Chart = io_lib:format("CHART erlang.run_queue_lengths_~w '' \\\"Run Queue Length #~w\\\" \\\"number\\\"", [Cnt + 1, Cnt + 1]),
+    Chart = io_lib:format("CHART erlang.run_queue_lengths_~w '' \"Run Queue Length #~w\" \"number\"", [Cnt + 1, Cnt + 1]),
     Dim = io_lib:format("DIMENSION run_queue_lengths_~w '' absolute 1 1", [Cnt + 1]),
     init_run_queue_lengths(Cnt + 1, Max, [Chart, Dim | Acc]).
 
 init_scheduler_wall_time(Cnt, Cnt, Acc) ->
     Acc;
 init_scheduler_wall_time(Cnt, Max, Acc) ->
-    Chart = io_lib:format("CHART erlang.scheduler_wall_time_~w '' \\\"Wall Time #~w\\\" \\\"number\\\"", [Cnt + 1, Cnt + 1]),
+    Chart = io_lib:format("CHART erlang.scheduler_wall_time_~w '' \"Wall Time #~w\" \"number\"", [Cnt + 1, Cnt + 1]),
     Dim = io_lib:format("DIMENSION scheduler_wall_time_~w '' incremental 1 1", [Cnt + 1]),
     init_scheduler_wall_time(Cnt + 1, Max, [Chart, Dim | Acc]).
 
@@ -140,36 +140,36 @@ init(active_tasks, Acc) ->
     init_active_tasks(0, erlang:system_info(schedulers), Acc);
 
 init(context_switches, Acc) ->
-    Chart = "CHART erlang.context_switches '' \\\"Context Switches\\\" \\\"number\\\"",
+    Chart = "CHART erlang.context_switches '' \"Context Switches\" \"number\"",
     Dim = "DIMENSION context_switches  '' incremental 1 1",
     [Chart, Dim | Acc];
 
 init(exact_reductions, Acc) ->
-    Chart = "CHART erlang.exact_reductions '' \\\"Exact Reductions\\\" \\\"number\\\"",
+    Chart = "CHART erlang.exact_reductions '' \"Exact Reductions\" \"number\"",
     Dim = "DIMENSION exact_reductions '' incremental 1 1",
     [Chart, Dim | Acc];
 
 init(garbage_collection, Acc) ->
-    ChartGCs = "CHART erlang.number_of_gcs '' \\\"Number of Garbage Collection\\\" \\\"number\\\"",
+    ChartGCs = "CHART erlang.number_of_gcs '' \"Number of Garbage Collection\" \"number\"",
     DimGCs = "DIMENSION number_of_gcs '' incremental 1 1",
-    ChartReclaimed = "CHART erlang.words_reclaimed '' \\\"Words Reclaimed\\\" \\\"number\\\"",
+    ChartReclaimed = "CHART erlang.words_reclaimed '' \"Words Reclaimed\" \"number\"",
     DimReclaimed = "DIMENSION words_reclaimed '' incremental 1 1",
     [ChartGCs, DimGCs, ChartReclaimed, DimReclaimed | Acc];
 
 init(io, Acc) ->
-    InputChart = "CHART erlang.input '' \\\"Input\\\" \\\"number\\\"",
-    OutputChart = "CHART erlang.output '' \\\"Output\\\" \\\"number\\\"",
+    InputChart = "CHART erlang.input '' \"Input\" \"number\"",
+    OutputChart = "CHART erlang.output '' \"Output\" \"number\"",
     InputDim = "DIMENSION input '' incremental 1 1",
     OutputDim = "DIMENSION output '' incremental 1 1",
     [InputChart, InputDim, OutputChart, OutputDim | Acc];
 
 init(reductions, Acc) ->
-    Chart = "CHART erlang.reductions '' \\\"Reductions\\\" \\\"number\\\"",
+    Chart = "CHART erlang.reductions '' \"Reductions\" \"number\"",
     Dim = "DIMENSION reductions '' incremental 1 1",
     [Chart, Dim | Acc];
 
 init(run_queue, Acc) ->
-    Chart = "CHART erlang.run_queue '' \\\"Run Queue Length\\\" \\\"number\\\"",
+    Chart = "CHART erlang.run_queue '' \"Run Queue Length\" \"number\"",
     Dim = "DIMENSION run_queue '' absolute 1 1",
     [Chart, Dim | Acc];
 
@@ -177,7 +177,7 @@ init(run_queue_lengths, Acc) ->
     init_run_queue_lengths(0, erlang:system_info(schedulers), Acc);
 
 init(runtime, Acc) ->
-    Chart = "CHART erlang.runtime '' \\\"Runtime\\\" \\\"number\\\"",
+    Chart = "CHART erlang.runtime '' \"Runtime\" \"number\"",
     Dim = "DIMENSION runtime '' incremental 1 1",
     [Chart, Dim | Acc];
 
@@ -186,17 +186,17 @@ init(scheduler_wall_time, Acc) ->
     init_scheduler_wall_time(0, erlang:system_info(schedulers), Acc);
 
 init(total_active_tasks, Acc) ->
-    Chart = "CHART erlang.total_active_tasks '' \\\"Active Tasks\\\" \\\"number\\\"",
+    Chart = "CHART erlang.total_active_tasks '' \"Active Tasks\" \"number\"",
     Dim = "DIMENSION total_active_tasks '' absolute 1 1",
     [Chart, Dim | Acc];
 
 init(total_run_queue_lengths, Acc) ->
-    Chart = "CHART erlang.total_run_queue_lengths '' \\\"Run Queue Lengths\\\" \\\"number\\\"",
+    Chart = "CHART erlang.total_run_queue_lengths '' \"Run Queue Lengths\" \"number\"",
     Dim = "DIMENSION total_run_queue_lengths '' absolute 1 1",
     [Chart, Dim | Acc];
 
 init(wall_clock, Acc) ->
-    Chart = "CHART erlang.wall_clock '' \\\"Wall Clock\\\" \\\"number\\\"",
+    Chart = "CHART erlang.wall_clock '' \"Wall Clock\" \"number\"",
     Dim = "DIMENSION wall_clock '' incremental 1 1",
     [Chart, Dim | Acc];
 
@@ -230,7 +230,7 @@ report_active_tasks(Interval, [ActiveTasks | T], Cnt, Acc0) ->
 report_run_queue_lengths(_Interval, [], _Cnt, Acc) ->
     Acc;
 report_run_queue_lengths(Interval, [RunQueueLength | T], Cnt, Acc0) ->
-    Acc = report_chart(erlang, {run_queue_lengths, Cnt + 1}, Interval, [{{run_queue_lenths, Cnt + 1}, RunQueueLength}], Acc0),
+    Acc = report_chart(erlang, {run_queue_lengths, Cnt + 1}, Interval, [{{run_queue_lengths, Cnt + 1}, RunQueueLength}], Acc0),
     report_run_queue_lengths(Interval, T, Cnt + 1, Acc).
 
 report_scheduler_wall_time(_Interval, undefined, Acc) ->
