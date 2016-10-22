@@ -5,10 +5,13 @@
   {modules, [
              netdata
             ]},
+  {mod, {netdata_app, []}},
   {registered, []},
   {applications, [
                   kernel,
-                  stdlib
+                  stdlib,
+		  sasl,
+		  lager
                  ]},
   {env, []}
  ]}.
