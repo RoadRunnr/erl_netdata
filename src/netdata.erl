@@ -1,3 +1,23 @@
+%% Copyright 2016, Travelping GmbH <info@travelping.com>
+
+%% Permission is hereby granted, free of charge, to any person obtaining a
+%% copy of this software and associated documentation files (the "Software"),
+%% to deal in the Software without restriction, including without limitation
+%% the rights to use, copy, modify, merge, publish, distribute, sublicense,
+%% and/or sell copies of the Software, and to permit persons to whom the
+%% Software is furnished to do so, subject to the following conditions:
+
+%% The above copyright notice and this permission notice shall be included in
+%% all copies or substantial portions of the Software.
+
+%% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+%% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+%% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+%% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+%% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+%% FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+%% DEALINGS IN THE SOFTWARE.
+
 -module(netdata).
 
 -behaviour(gen_statem).
@@ -15,7 +35,7 @@
 -define(DEFAULT_TIMEOUT, 2).
 -define(MAX_TIMEOUT, 30).
 
--record(state, {charts, timeout, interval, last, socket}).
+-record(state, {charts, timer, timeout, interval, last, socket}).
 
 -define(STATISTICS, [active_tasks, context_switches, exact_reductions, garbage_collection,
 		     io, reductions, run_queue, run_queue_lengths, runtime, scheduler_wall_time,
@@ -48,50 +68,59 @@ callback_mode() -> state_functions.
 init([]) ->
     State0 = #state{charts = [], timeout = ?DEFAULT_TIMEOUT},
     State = lists:foldl(fun init/2, State0, ?STATISTICS),
-    {ok, connect, State, [{timeout, 0, reconnect}]}.
+    {ok, connect, State, [{next_event, internal, reconnect}]}.
 
 -spec connect(
 	gen_statem:event_type(), Msg :: term(),
 	Data :: term()) ->
 			gen_statem:state_function_result().
-connect(timeout, reconnect, #state{timeout = TimeOut} = Data) ->
+connect(Type, reconnect, #state{timeout = TimeOut} = Data)
+  when Type == internal; Type == info ->
     case gen_tcp:connect({local, <<0, "/tmp/netdata">>}, 0,
 			 [local, {active, true}, {mode, list}, {packet, line}]) of
 	{ok, Socket} ->
-	    {next_state, reporting, Data#state{socket = Socket}};
-	_ when TimeOut < ?MAX_TIMEOUT ->
-	    {keep_state, Data#state{timeout = TimeOut * 2}, [{timeout, TimeOut * 1000, reconnect}]};
+	    cancel_timer(Data),
+	    {next_state, reporting, Data#state{socket = Socket, last = undefined}};
+
 	_ ->
-	    {keep_state_and_data, [{timeout, TimeOut * 1000, reconnect}]}
+	    TRef = erlang:send_after(TimeOut * 1000, self(), reconnect),
+	    NextTimeOut = min(?MAX_TIMEOUT, TimeOut * 2),
+	    {keep_state, Data#state{timeout = NextTimeOut, timer = TRef}}
     end.
 
 -spec reporting(
 	gen_statem:event_type(), Msg :: term(),
 	Data :: term()) ->
 			gen_statem:state_function_result().
-reporting(timeout, report, #state{charts = ChartsIn, interval = Interval, socket = Socket, last = Last} = Data) ->
+reporting(Type, report, #state{charts = ChartsIn, interval = Interval, socket = Socket, last = Last} = Data)
+  when Type == internal; Type == info ->
     Now = erlang:monotonic_time(millisecond),
     TDiff = if is_integer(Last) -> Now - Last;
 	       true             -> 0
 	    end,
     {Report, ChartsOut} = report(TDiff, ChartsIn),
     gen_tcp:send(Socket, Report),
-    {keep_state, Data#state{charts = ChartsOut, last = Now}, [{timeout, Interval, report}]};
+
+    TRef = erlang:send_after(Interval, self(), report),
+    {keep_state, Data#state{charts = ChartsOut, timer = TRef, last = Now}};
 
 reporting(info, {tcp, Socket, Msg}, #state{charts = Charts, socket = Socket} = Data) ->
     case io_lib:fread("START ~d", Msg) of
 	{ok, [Interval], _} ->
 	    Init = init_report(Charts, Interval),
 	    gen_tcp:send(Socket, Init),
-	    {keep_state, Data#state{interval = Interval * 1000}, [{timeout, 0, report}]};
+
+	    {keep_state, Data#state{interval = Interval * 1000}, [{next_event, internal, report}]};
 	_Other ->
 	    keep_state_and_data
     end;
 reporting(info, {tcp_closed, _Socket}, Data) ->
-    {next_state, connect, Data#state{timeout = ?DEFAULT_TIMEOUT, socket = undefined}, [{timeout, 0, reconnect}]};
+    cancel_timer(Data),
+    {next_state, connect, Data#state{timeout = ?DEFAULT_TIMEOUT, socket = undefined}, [{next_event, internal, reconnect}]};
 reporting(info, {tcp_error, _Socket, _Reason}, Data) ->
-    {next_state, connect, Data#state{timeout = ?DEFAULT_TIMEOUT, socket = undefined}, [{timeout, 0, reconnect}]};
-reporting(Type, Msg, Data) ->
+    cancel_timer(Data),
+    {next_state, connect, Data#state{timeout = ?DEFAULT_TIMEOUT, socket = undefined}, [{next_event, internal, reconnect}]};
+reporting(_Type, _Msg, _Data) ->
     keep_state_and_data.
 
 -spec terminate(Reason :: term(), State :: term(), Data :: term()) ->
@@ -109,6 +138,18 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+cancel_timer(#state{timer = TRef}) when is_reference(TRef) ->
+    case erlang:cancel_timer(TRef) of
+        false ->
+            receive {timeout, TRef, _} -> 0
+            after 0 -> false
+            end;
+        RemainingTime ->
+            RemainingTime
+    end;
+cancel_timer(_) ->
+    false.
 
 -define(DEFAULT_CHART, #{type         => undefined,
 			 id           => undefined,
