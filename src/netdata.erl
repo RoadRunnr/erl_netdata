@@ -94,7 +94,7 @@ connect(Type, reconnect, #state{timeout = TimeOut} = Data)
 			gen_statem:state_function_result().
 reporting(Type, report, #state{charts = ChartsIn, interval = Interval, socket = Socket, last = Last} = Data)
   when Type == internal; Type == info ->
-    Now = erlang:monotonic_time(millisecond),
+    Now = erlang:monotonic_time(microsecond),
     TDiff = if is_integer(Last) -> Now - Last;
 	       true             -> undefined
 	    end,
