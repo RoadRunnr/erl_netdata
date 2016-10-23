@@ -2,8 +2,7 @@
 
 -behaviour(gen_statem).
 
--compile([{parse_transform, cut},
-	  {parse_transform, lager_transform}]).
+-compile([{parse_transform, cut}]).
 
 %% API
 -export([start_link/0]).
@@ -16,7 +15,11 @@
 -define(DEFAULT_TIMEOUT, 2).
 -define(MAX_TIMEOUT, 30).
 
--record(state, {timeout, interval, socket}).
+-record(state, {charts, timeout, interval, last, socket}).
+
+-define(STATISTICS, [active_tasks, context_switches, exact_reductions, garbage_collection,
+		     io, reductions, run_queue, run_queue_lengths, runtime, scheduler_wall_time,
+		     total_active_tasks, total_run_queue_lengths, wall_clock]).
 
 %%%===================================================================
 %%% API
@@ -43,8 +46,9 @@ callback_mode() -> state_functions.
 		  ignore |
 		  {stop, Reason :: term()}.
 init([]) ->
-    io:format("netdata started~n"),
-    {ok, connect, #state{timeout = ?DEFAULT_TIMEOUT}, [{timeout, 0, reconnect}]}.
+    State0 = #state{charts = [], timeout = ?DEFAULT_TIMEOUT},
+    State = lists:foldl(fun init/2, State0, ?STATISTICS),
+    {ok, connect, State, [{timeout, 0, reconnect}]}.
 
 -spec connect(
 	gen_statem:event_type(), Msg :: term(),
@@ -65,15 +69,19 @@ connect(timeout, reconnect, #state{timeout = TimeOut} = Data) ->
 	gen_statem:event_type(), Msg :: term(),
 	Data :: term()) ->
 			gen_statem:state_function_result().
-reporting(timeout, report, #state{interval = Interval, socket = Socket}) ->
-    Report= report(1),
+reporting(timeout, report, #state{charts = ChartsIn, interval = Interval, socket = Socket, last = Last} = Data) ->
+    Now = erlang:monotonic_time(millisecond),
+    TDiff = if is_integer(Last) -> Now - Last;
+	       true             -> 0
+	    end,
+    {Report, ChartsOut} = report(TDiff, ChartsIn),
     gen_tcp:send(Socket, Report),
-    {keep_state_and_data, [{timeout, Interval, report}]};
+    {keep_state, Data#state{charts = ChartsOut, last = Now}, [{timeout, Interval, report}]};
 
-reporting(info, {tcp, Socket, Msg}, #state{socket = Socket} = Data) ->
+reporting(info, {tcp, Socket, Msg}, #state{charts = Charts, socket = Socket} = Data) ->
     case io_lib:fread("START ~d", Msg) of
 	{ok, [Interval], _} ->
-	    Init = init_report(Interval),
+	    Init = init_report(Charts, Interval),
 	    gen_tcp:send(Socket, Init),
 	    {keep_state, Data#state{interval = Interval * 1000}, [{timeout, 0, report}]};
 	_Other ->
@@ -84,7 +92,6 @@ reporting(info, {tcp_closed, _Socket}, Data) ->
 reporting(info, {tcp_error, _Socket, _Reason}, Data) ->
     {next_state, connect, Data#state{timeout = ?DEFAULT_TIMEOUT, socket = undefined}, [{timeout, 0, reconnect}]};
 reporting(Type, Msg, Data) ->
-    lager:error("In Reporting got (~p, ~p, ~p)", [Type, Msg, Data]),
     keep_state_and_data.
 
 -spec terminate(Reason :: term(), State :: term(), Data :: term()) ->
@@ -103,202 +110,241 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
--define(STATISTICS, [active_tasks, context_switches, exact_reductions, garbage_collection,
-		     io, reductions, run_queue, run_queue_lengths, runtime, scheduler_wall_time,
-		     total_active_tasks, total_run_queue_lengths, wall_clock]).
+-define(DEFAULT_CHART, #{type         => undefined,
+			 id           => undefined,
+			 name         => undefined,
+			 title        => undefined,
+			 units        => undefined,
+			 family       => undefined,
+			 context      => undefined,
+			 charttype    => undefined,
+			 priority     => undefined,
+			 update_every => undefined,
+			 values       => [],
+			 init         => fun(X) -> X end}).
 
-init_report(_Interval) ->
-    Init = lists:foldl(fun init/2, [], ?STATISTICS),
-    lists:flatten(string:join(Init, "\n")).
+-define(DEFAULT_VALUE, #{id         => undefined,
+			 name       => undefined,
+			 algorithm  => undefined,
+			 multiplier => 1,
+			 divisor    => 1,
+			 hidden     => undefined,
+			 get        => fun(_Id, _X) -> 0 end}).
 
-report(Interval) ->
-    Data = lists:reverse(lists:foldl(report(_, Interval, _), [], ?STATISTICS)),
-    [string:join(Data, "\n"), "\n"].
+register_chart(Chart0, #state{charts = Charts} = State) ->
+    Chart1 = maps:merge(?DEFAULT_CHART, Chart0),
+    Chart2 = Chart1#{values =>
+			 [maps:merge(?DEFAULT_VALUE, V) ||
+			     V <- maps:get(values, Chart1, [])]},
+    State#state{charts = [Chart2 | Charts]}.
 
-init_active_tasks(Cnt, Cnt, Acc) ->
-    Acc;
-init_active_tasks(Cnt, Max, Acc) ->
-    Chart = io_lib:format("CHART erlang.active_tasks_~w '' \"Active Tasks #~w\" \"number\"", [Cnt + 1, Cnt + 1]),
-    Dim = io_lib:format("DIMENSION active_tasks_~w '' absolute 1 1", [Cnt + 1]),
-    init_active_tasks(Cnt + 1, Max, [Chart, Dim | Acc]).
+init_report(Charts, _Interval) ->
+    Charts1 = lists:foldl(fun init_chart/2, [], Charts),
+    Charts2 = lists:reverse(Charts1),
+    [string:join(Charts2, "\n"), "\n"].
 
-init_run_queue_lengths(Cnt, Cnt, Acc) ->
-    Acc;
-init_run_queue_lengths(Cnt, Max, Acc) ->
-    Chart = io_lib:format("CHART erlang.run_queue_lengths_~w '' \"Run Queue Length #~w\" \"number\"", [Cnt + 1, Cnt + 1]),
-    Dim = io_lib:format("DIMENSION run_queue_lengths_~w '' absolute 1 1", [Cnt + 1]),
-    init_run_queue_lengths(Cnt + 1, Max, [Chart, Dim | Acc]).
+report(Interval, ChartsIn) ->
+    {ChartsOut, Reports1} = lists:mapfoldl(report_chart(_, Interval, _), [], ChartsIn),
+    Reports2 = lists:reverse(Reports1),
+    {[string:join(Reports2, "\n"), "\n"], ChartsOut}.
 
-init_scheduler_wall_time(Cnt, Cnt, Acc) ->
-    Acc;
-init_scheduler_wall_time(Cnt, Max, Acc) ->
-    Chart = io_lib:format("CHART erlang.scheduler_wall_time_~w '' \"Wall Time #~w\" \"number\"", [Cnt + 1, Cnt + 1]),
-    Dim = io_lib:format("DIMENSION scheduler_wall_time_~w '' incremental 1 1", [Cnt + 1]),
-    init_scheduler_wall_time(Cnt + 1, Max, [Chart, Dim | Acc]).
+fmt({Id, Cnt}) ->
+    [fmt(Id), "_", fmt(Cnt)];
+fmt(undefined) ->
+    "''";
+fmt(V) when is_atom(V) ->
+    atom_to_list(V);
+fmt(V) when is_integer(V) ->
+    integer_to_list(V);
+fmt(V) when is_float(V) ->
+    float_to_list(V);
+fmt(V) when is_list(V); is_binary(V) ->
+    ["\"", V, "\""].
 
-init(active_tasks, Acc) ->
-    init_active_tasks(0, erlang:system_info(schedulers), Acc);
+init_chart(#{type := Type, id := Id, values := Values} = Def, Acc) ->
+    C0 = lists:map(fun(K) -> fmt(maps:get(K, Def, undefined)) end,
+		   [name, title, units, family,
+		    context, charttype, priority, update_every]),
+    Chart = string:join(["CHART", [fmt(Type), $., fmt(Id)] | C0], " "),
+    lists:foldl(fun(V, A) -> init_chart_values(V, A) end, [Chart | Acc], Values).
 
-init(context_switches, Acc) ->
-    Chart = "CHART erlang.context_switches '' \"Context Switches\" \"number\"",
-    Dim = "DIMENSION context_switches  '' incremental 1 1",
-    [Chart, Dim | Acc];
+init_chart_values(Value, Acc) ->
+    V0 = lists:map(fun(K) -> fmt(maps:get(K, Value, undefined)) end,
+		   [id, name, algorithm, multiplier, divisor, hidden]),
+    [string:join(["DIMENSION" | V0], " ") | Acc].
 
-init(exact_reductions, Acc) ->
-    Chart = "CHART erlang.exact_reductions '' \"Exact Reductions\" \"number\"",
-    Dim = "DIMENSION exact_reductions '' incremental 1 1",
-    [Chart, Dim | Acc];
 
-init(garbage_collection, Acc) ->
-    ChartGCs = "CHART erlang.number_of_gcs '' \"Number of Garbage Collection\" \"number\"",
-    DimGCs = "DIMENSION number_of_gcs '' incremental 1 1",
-    ChartReclaimed = "CHART erlang.words_reclaimed '' \"Words Reclaimed\" \"number\"",
-    DimReclaimed = "DIMENSION words_reclaimed '' incremental 1 1",
-    [ChartGCs, DimGCs, ChartReclaimed, DimReclaimed | Acc];
+report_chart_values(#{id := Id, get := Get}, Value, Acc) ->
+    Set = ["SET ", fmt(Id), " = ", fmt(Get(Id, Value))],
+    [Set | Acc].
 
-init(io, Acc) ->
-    InputChart = "CHART erlang.input '' \"Input\" \"number\"",
-    OutputChart = "CHART erlang.output '' \"Output\" \"number\"",
-    InputDim = "DIMENSION input '' incremental 1 1",
-    OutputDim = "DIMENSION output '' incremental 1 1",
-    [InputChart, InputDim, OutputChart, OutputDim | Acc];
+report_chart(#{type := Type, id := Id, values := Values, init := Init} = Report,
+	     Interval, Acc0) ->
+    Begin = ["BEGIN ", fmt(Type) , $., fmt(Id), " ", fmt(Interval)],
+    Value = Init(maps:get(value, Report, undefined)),
+    Acc = lists:foldl(report_chart_values(_, Value, _), [Begin | Acc0], Values),
+    {Report#{value => Value}, ["END" | Acc]}.
 
-init(reductions, Acc) ->
-    Chart = "CHART erlang.reductions '' \"Reductions\" \"number\"",
-    Dim = "DIMENSION reductions '' incremental 1 1",
-    [Chart, Dim | Acc];
+%%%===================================================================
+%%% default system charts
+%%%===================================================================
 
-init(run_queue, Acc) ->
-    Chart = "CHART erlang.run_queue '' \"Run Queue Length\" \"number\"",
-    Dim = "DIMENSION run_queue '' absolute 1 1",
-    [Chart, Dim | Acc];
+init(active_tasks, State) ->
+    Value = #{algorithm => absolute, get => fun({_, Id}, Tasks) -> lists:nth(Id, Tasks) end},
+    Values = [Value#{id => {active_tasks, Id}} ||
+		 Id <- lists:seq(1, erlang:system_info(schedulers))], 
+    Chart = #{type   => erlang, id => active_tasks,
+	      title  => "Active Tasks",
+	      units  => "number",
+	      values => Values,
+	      init   => fun(_) -> erlang:statistics(active_tasks) end
+	     },
+    register_chart(Chart, State);
 
-init(run_queue_lengths, Acc) ->
-    init_run_queue_lengths(0, erlang:system_info(schedulers), Acc);
+init(context_switches, State) ->
+    Chart = #{type   => erlang, id => context_switches,
+	      title  => "Context Switches",
+	      units  => "number",
+	      values => [#{id => context_switches, algorithm => incremental,
+			   get => fun(_, {ContextSwitches, _}) -> ContextSwitches end}],
+	      init   => fun(_) -> erlang:statistics(context_switches) end
+	     },
+    register_chart(Chart, State);
 
-init(runtime, Acc) ->
-    Chart = "CHART erlang.runtime '' \"Runtime\" \"number\"",
-    Dim = "DIMENSION runtime '' incremental 1 1",
-    [Chart, Dim | Acc];
+init(exact_reductions, State) ->
+    Chart = #{type => erlang, id => exact_reductions,
+	      title => "Exact Reductions",
+	      units => "number",
+	      values => [#{id => exact_reductions, algorithm => incremental,
+			   get => fun(_, {TotalExactReductions, _ExactReductionsSinceLastCall}) ->
+					  TotalExactReductions end}],
+	      init => fun(_) -> erlang:statistics(exact_reductions) end
+	     },
+    register_chart(Chart, State);
 
-init(scheduler_wall_time, Acc) ->
+init(garbage_collection, State0) ->
+    Chart1 = #{type   => erlang, id => number_of_gcs,
+	       title  => "Number of Garbage Collection",
+	       units  => "number",
+	       values => [#{id => number_of_gcs, algorithm => incremental,
+			    get => fun(_, {NumberofGCs, _, _}) -> NumberofGCs end}],
+	       init   => fun(_) -> erlang:statistics(garbage_collection) end
+	      },
+    Chart2 = #{type   => erlang, id => words_reclaimed,
+	       title  => "Words Reclaimed",
+	       units  => "number",
+	       values => [#{id => words_reclaimed, algorithm => incremental,
+			    get => fun(_, {_, WordsReclaimed, _}) -> WordsReclaimed end}],
+	       init   => fun(_) -> erlang:statistics(garbage_collection) end
+	      },
+    State = register_chart(Chart1, State0),
+    register_chart(Chart2, State);
+
+init(io, State) ->
+    Chart = #{type   => erlang, id => io,
+	      title  => "I/O",
+	      units  => "number",
+	      values => [#{id => input, algorithm => incremental,
+			   get => fun(_, {{input, Input}, _}) -> Input end},
+			 #{id => output, algorithm => incremental,
+			   get => fun(_, {_, {output, Output}}) -> Output end}],
+	      init   => fun(_) -> erlang:statistics(io) end
+	     },
+    register_chart(Chart, State);
+
+init(reductions, State) ->
+    Chart = #{type   => erlang, id => reductions,
+	      title  => "Reductions",
+	      units  => "number",
+	      values => [#{id  => reductions, algorithm => incremental,
+			   get => fun(_, {TotalReductions, _ReductionsSinceLastCall}) ->
+					  TotalReductions end}],
+	      init   => fun(_) -> erlang:statistics(reductions) end
+	     },
+    register_chart(Chart, State);
+
+init(run_queue, State) ->
+    Chart = #{type   => erlang, id => run_queue,
+	      title  => "Run Queue Length",
+	      units  => "number",
+	      values => [#{id => run_queue, algorithm => absolute,
+			   get => fun(_, RunQueue) -> RunQueue end}],
+	      init   => fun(_) -> erlang:statistics(run_queue) end
+	     },
+    register_chart(Chart, State);
+
+init(run_queue_lengths, State) ->
+    Value = #{algorithm => absolute, get => fun({_, Id}, Lengths) -> lists:nth(Id, Lengths) end},
+    Values = [Value#{id => {run_queue_lengths, Id}} ||
+		 Id <- lists:seq(1, erlang:system_info(schedulers))], 
+    Chart = #{type   => erlang, id => run_queue_lengths,
+	      title  => "Run Queue Length",
+	      units  => "number",
+	      values => Values,
+	      init   => fun(_) -> erlang:statistics(run_queue_lengths) end
+	     },
+    register_chart(Chart, State);
+
+init(runtime, State) ->
+    Chart = #{type   => erlang, id => runtime,
+	      title  => "Runtime",
+	      units  => "number",
+	      values => [#{id => runtime, algorithm => incremental,
+			   get => fun(_, {TotalRunTime, _TimeSinceLastCall}) ->
+					  TotalRunTime end}],
+	      init   => fun(_) -> erlang:statistics(runtime) end
+	     },
+    register_chart(Chart, State);
+
+init(scheduler_wall_time, State) ->
     erlang:system_flag(scheduler_wall_time, true),
-    init_scheduler_wall_time(0, erlang:system_info(schedulers), Acc);
 
-init(total_active_tasks, Acc) ->
-    Chart = "CHART erlang.total_active_tasks '' \"Active Tasks\" \"number\"",
-    Dim = "DIMENSION total_active_tasks '' absolute 1 1",
-    [Chart, Dim | Acc];
+    Get = fun({_, Id}, WallTime) ->
+		  {_SchedulerId, ActiveTime, _TotalTime} =
+		      lists:keyfind(Id, 1, WallTime),
+		  ActiveTime
+	  end,
+    Value = #{algorithm => incremental, get => Get},
+    Values = [Value#{id => {scheduler_wall_time, Id}} ||
+		 Id <- lists:seq(1, erlang:system_info(schedulers))], 
+    Chart = #{type   => erlang, id => scheduler_wall_time,
+	      title  => "Wall Time",
+	      units  => "number",
+	      values => Values,
+	      init   => fun(_) -> erlang:statistics(scheduler_wall_time) end
+	     },
+    register_chart(Chart, State);
 
-init(total_run_queue_lengths, Acc) ->
-    Chart = "CHART erlang.total_run_queue_lengths '' \"Run Queue Lengths\" \"number\"",
-    Dim = "DIMENSION total_run_queue_lengths '' absolute 1 1",
-    [Chart, Dim | Acc];
+init(total_active_tasks, State) ->
+    Chart = #{type   => erlang, id => total_active_tasks,
+	      title  => "Active Tasks",
+	      units  => "number",
+	      values => [#{id => total_active_tasks, algorithm => absolute,
+			   get => fun(_, ActiveTasks) -> ActiveTasks end}],
+	      init   => fun(_) -> erlang:statistics(total_active_tasks) end
+	     },
+    register_chart(Chart, State);
 
-init(wall_clock, Acc) ->
-    Chart = "CHART erlang.wall_clock '' \"Wall Clock\" \"number\"",
-    Dim = "DIMENSION wall_clock '' incremental 1 1",
-    [Chart, Dim | Acc];
+init(total_run_queue_lengths, State) ->
+    Chart = #{type   => erlang, id => total_run_queue_lengths,
+	      title  => "Run Queue Lengths",
+	      units  => "number",
+	      values => [#{id => total_run_queue_lengths, algorithm => absolute,
+			   get => fun(_, TotalRunQueueLenghts) -> TotalRunQueueLenghts end}],
+	      init   => fun(_) -> erlang:statistics(total_run_queue_lengths) end
+	     },
+    register_chart(Chart, State);
 
-init(_, Acc) ->
-    Acc.
+init(wall_clock, State) ->
+    Chart = #{type   => erlang, id => wall_clock,
+	      title  => "Wall Clock",
+	      units  => "number",
+	      values => [#{id => wall_clock, algorithm => incremental,
+			   get => fun(_, {TotalWallclockTime, _WallclockTimeSinceLastCall}) ->
+					  TotalWallclockTime end}],
+	      init   => fun(_) -> erlang:statistics(wall_clock) end
+	     },
+    register_chart(Chart, State);
 
-report_chart_values([], Acc) ->
-    Acc;
-report_chart_values([{{Id, Cnt}, Value} | T], Acc) ->
-    Set = io_lib:format("SET ~s_~w = ~w", [Id, Cnt, Value]),
-    report_chart_values(T, [Set | Acc]);
-report_chart_values([{Id, Value} | T], Acc) ->
-    Set = io_lib:format("SET ~s = ~w", [Id, Value]),
-    report_chart_values(T, [Set | Acc]).
-
-report_chart(Type, {Id, Cnt}, Interval, Values, Acc0) ->
-    Begin = io_lib:format("BEGIN ~s.~s_~w ~w", [Type, Id, Cnt, Interval]),
-    Acc = report_chart_values(Values, [Begin | Acc0]),
-    ["END" | Acc];
-report_chart(Type, Id, Interval, Values, Acc0) ->
-    Begin = io_lib:format("BEGIN ~s.~s ~w", [Type, Id, Interval]),
-    Acc = report_chart_values(Values, [Begin | Acc0]),
-    ["END" | Acc].
-
-report_active_tasks(_Interval, [], _Cnt, Acc) ->
-    Acc;
-report_active_tasks(Interval, [ActiveTasks | T], Cnt, Acc0) ->
-    Acc = report_chart(erlang, {active_tasks, Cnt + 1}, Interval, [{{active_tasks, Cnt + 1}, ActiveTasks}], Acc0),
-    report_active_tasks(Interval, T, Cnt + 1, Acc).
-
-report_run_queue_lengths(_Interval, [], _Cnt, Acc) ->
-    Acc;
-report_run_queue_lengths(Interval, [RunQueueLength | T], Cnt, Acc0) ->
-    Acc = report_chart(erlang, {run_queue_lengths, Cnt + 1}, Interval, [{{run_queue_lengths, Cnt + 1}, RunQueueLength}], Acc0),
-    report_run_queue_lengths(Interval, T, Cnt + 1, Acc).
-
-report_scheduler_wall_time(_Interval, undefined, Acc) ->
-    Acc;
-report_scheduler_wall_time(_Interval, [], Acc) ->
-    Acc;
-report_scheduler_wall_time(Interval, [{SchedulerId, ActiveTime, _TotalTime} | T], Acc0) ->
-    Acc = report_chart(erlang, {scheduler_wall_time, SchedulerId}, Interval, [{{scheduler_wall_time, SchedulerId}, ActiveTime}], Acc0),
-    report_scheduler_wall_time(Interval, T, Acc).
-
-report(active_tasks, Interval, Acc) ->
-    ActiveTasks = erlang:statistics(active_tasks),
-    report_active_tasks(Interval, ActiveTasks, 0, Acc);
-
-report(context_switches, Interval, Acc) ->
-    {ContextSwitches, _} = erlang:statistics(context_switches),
-    report_chart(erlang, context_switches, Interval, [{context_switches, ContextSwitches}], Acc);
-
-report(exact_reductions, Interval, Acc) ->
-    {TotalExactReductions, _ExactReductionsSinceLastCall}
-	= erlang:statistics(exact_reductions),
-    report_chart(erlang, exact_reductions, Interval, [{exact_reductions, TotalExactReductions}], Acc);
-
-report(garbage_collection, Interval, Acc0) ->
-    {NumberofGCs, WordsReclaimed, _} = erlang:statistics(garbage_collection),
-    Acc = report_chart(erlang, number_of_gcs, Interval, [{number_of_gcs, NumberofGCs}], Acc0),
-    report_chart(erlang, words_reclaimed, Interval, [{words_reclaimed, WordsReclaimed}], Acc);
-
-report(io, Interval, Acc0) ->
-    {{input, Input}, {output, Output}} = erlang:statistics(io),
-    Acc = report_chart(erlang, input, Interval, [{input, Input}], Acc0),
-    report_chart(erlang, output, Interval, [{output, Output}], Acc);
-
-report(reductions, Interval, Acc) ->
-    {TotalReductions, _ReductionsSinceLastCall}
-	= erlang:statistics(reductions),
-    report_chart(erlang, reductions, Interval, [{reductions, TotalReductions}], Acc);
-
-report(run_queue, Interval, Acc) ->
-    RunQueue = erlang:statistics(run_queue),
-    report_chart(erlang, run_queue, Interval, [{run_queue, RunQueue}], Acc);
-
-report(run_queue_lengths, Interval, Acc) ->
-    RunQueueLenghts = erlang:statistics(run_queue_lengths),
-    report_run_queue_lengths(Interval, RunQueueLenghts, 0, Acc);
-
-report(runtime, Interval, Acc) ->
-    {TotalRunTime, _TimeSinceLastCall}
-	= erlang:statistics(runtime),
-    report_chart(erlang, runtime, Interval, [{runtime, TotalRunTime}], Acc);
-
-report(scheduler_wall_time, Interval, Acc) ->
-    SchedulerWallTimes = erlang:statistics(scheduler_wall_time),
-    report_scheduler_wall_time(Interval, SchedulerWallTimes, Acc);
-
-report(total_active_tasks, Interval, Acc) ->
-    ActiveTasks = erlang:statistics(total_active_tasks),
-    report_chart(erlang, total_active_tasks, Interval, [{total_active_tasks, ActiveTasks}], Acc);
-
-report(total_run_queue_lengths, Interval, Acc) ->
-    TotalRunQueueLenghts = erlang:statistics(total_run_queue_lengths),
-    report_chart(erlang, total_run_queue_lengths, Interval, [{total_run_queue_lengths, TotalRunQueueLenghts}], Acc);
-
-report(wall_clock, Interval, Acc) ->
-    {TotalWallclockTime, _WallclockTimeSinceLastCall}
-	= erlang:statistics(wall_clock),
-    report_chart(erlang, wall_clock, Interval, [{wall_clock, TotalWallclockTime}], Acc);
-
-report(_, _Interval, Acc) ->
-    Acc.
-
+init(_, State) ->
+    State.

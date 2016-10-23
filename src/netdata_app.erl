@@ -30,7 +30,6 @@
 %% ===================================================================
 
 start(_StartType, _StartArgs) ->
-    lager:set_loglevel(lager_console_backend, debug),
     netdata_sup:start_link().
 
 stop(_State) ->
