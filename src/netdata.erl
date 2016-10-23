@@ -96,7 +96,7 @@ reporting(Type, report, #state{charts = ChartsIn, interval = Interval, socket = 
   when Type == internal; Type == info ->
     Now = erlang:monotonic_time(millisecond),
     TDiff = if is_integer(Last) -> Now - Last;
-	       true             -> 0
+	       true             -> undefined
 	    end,
     {Report, ChartsOut} = report(TDiff, ChartsIn),
     gen_tcp:send(Socket, Report),
@@ -107,7 +107,7 @@ reporting(Type, report, #state{charts = ChartsIn, interval = Interval, socket = 
 reporting(info, {tcp, Socket, Msg}, #state{charts = Charts, socket = Socket} = Data) ->
     case io_lib:fread("START ~d", Msg) of
 	{ok, [Interval], _} ->
-	    Init = init_report(Charts, Interval),
+	    Init = init_report(Interval, Charts),
 	    gen_tcp:send(Socket, Init),
 
 	    {keep_state, Data#state{interval = Interval * 1000}, [{next_event, internal, report}]};
@@ -156,11 +156,8 @@ cancel_timer(_) ->
 			 name         => undefined,
 			 title        => undefined,
 			 units        => undefined,
-			 family       => undefined,
-			 context      => undefined,
-			 charttype    => undefined,
-			 priority     => undefined,
-			 update_every => undefined,
+			 charttype    => line,
+			 priority     => 1000,
 			 values       => [],
 			 init         => fun(X) -> X end}).
 
@@ -179,8 +176,8 @@ register_chart(Chart0, #state{charts = Charts} = State) ->
 			     V <- maps:get(values, Chart1, [])]},
     State#state{charts = [Chart2 | Charts]}.
 
-init_report(Charts, _Interval) ->
-    Charts1 = lists:foldl(fun init_chart/2, [], Charts),
+init_report(Interval, Charts) ->
+    Charts1 = lists:foldl(init_chart(_, Interval, _), [], Charts),
     Charts2 = lists:reverse(Charts1),
     [string:join(Charts2, "\n"), "\n"].
 
@@ -202,10 +199,16 @@ fmt(V) when is_float(V) ->
 fmt(V) when is_list(V); is_binary(V) ->
     ["\"", V, "\""].
 
-init_chart(#{type := Type, id := Id, values := Values} = Def, Acc) ->
-    C0 = lists:map(fun(K) -> fmt(maps:get(K, Def, undefined)) end,
-		   [name, title, units, family,
-		    context, charttype, priority, update_every]),
+init_chart(#{type := Type, id := Id, values := Values} = Def, Interval, Acc) ->
+    C0 = lists:map(fun({K, Default}) ->
+			   fmt(maps:get(K, Def, Default));
+		      (K) ->
+			   fmt(maps:get(K, Def, undefined))
+		   end,
+		   [name, title, units,
+		    {family, Id}, {context, "Erlang"},
+		    charttype, priority,
+		    {update_every, Interval}]),
     Chart = string:join(["CHART", [fmt(Type), $., fmt(Id)] | C0], " "),
     lists:foldl(fun(V, A) -> init_chart_values(V, A) end, [Chart | Acc], Values).
 
@@ -221,7 +224,11 @@ report_chart_values(#{id := Id, get := Get}, Value, Acc) ->
 
 report_chart(#{type := Type, id := Id, values := Values, init := Init} = Report,
 	     Interval, Acc0) ->
-    Begin = ["BEGIN ", fmt(Type) , $., fmt(Id), " ", fmt(Interval)],
+    Begin = if is_integer(Interval) ->
+		    ["BEGIN ", fmt(Type) , $., fmt(Id), " ", fmt(Interval)];
+	       true ->
+		    ["BEGIN ", fmt(Type) , $., fmt(Id)]
+	    end,
     Value = Init(maps:get(value, Report, undefined)),
     Acc = lists:foldl(report_chart_values(_, Value, _), [Begin | Acc0], Values),
     {Report#{value => Value}, ["END" | Acc]}.
