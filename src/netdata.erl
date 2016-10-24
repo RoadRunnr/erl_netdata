@@ -159,7 +159,7 @@ cancel_timer(_) ->
 			 charttype    => line,
 			 priority     => 1000,
 			 values       => [],
-			 init         => fun(X) -> X end}).
+			 init         => fun(_Id, X) -> X end}).
 
 -define(DEFAULT_VALUE, #{id         => undefined,
 			 name       => undefined,
@@ -171,18 +171,28 @@ cancel_timer(_) ->
 
 register_chart(Chart0, #state{charts = Charts} = State) ->
     Chart1 = maps:merge(?DEFAULT_CHART, Chart0),
-    Chart2 = Chart1#{values =>
-			 [maps:merge(?DEFAULT_VALUE, V) ||
-			     V <- maps:get(values, Chart1, [])]},
-    State#state{charts = [Chart2 | Charts]}.
+    Chart2 = Chart1#{
+	       identifier => maps:get(identifier, Chart1, maps:get(id, Chart1)),
+	       values =>
+		   lists:map(fun(V) ->
+				     V1 = maps:merge(?DEFAULT_VALUE, V),
+				     V1#{identifier => maps:get(identifier, V1, maps:get(id, V1))}
+			     end, maps:get(values, Chart1, []))},
+
+    %% work arround for cut parse transform bug
+    %% #{type := Type, id := Id} = Chart2,
+    Type = maps:get(type, Chart2),
+    Id = maps:get(id, Chart2),
+
+    State#state{charts = Charts#{ {Type, Id} => Chart2 }, updated = true}.
 
 init_report(Interval, Charts) ->
-    Charts1 = lists:foldl(init_chart(_, Interval, _), [], Charts),
+    Charts1 = maps:fold(init_chart(_, _, Interval, _), [], Charts),
     Charts2 = lists:reverse(Charts1),
     [string:join(Charts2, "\n"), "\n"].
 
 report(Interval, ChartsIn) ->
-    {ChartsOut, Reports1} = lists:mapfoldl(report_chart(_, Interval, _), [], ChartsIn),
+    {ChartsOut, Reports1} = maps_mapfold(report_chart(_, _, Interval, _), [], ChartsIn),
     Reports2 = lists:reverse(Reports1),
     {[string:join(Reports2, "\n"), "\n"], ChartsOut}.
 
@@ -199,7 +209,16 @@ fmt(V) when is_float(V) ->
 fmt(V) when is_list(V); is_binary(V) ->
     ["\"", V, "\""].
 
-init_chart(#{type := Type, id := Id, values := Values} = Def, Interval, Acc) ->
+fmt_id({Id, Cnt}) ->
+    [fmt_id(Id), "_", fmt_id(Cnt)];
+fmt_id(V) when is_integer(V) ->
+    integer_to_list(V);
+fmt_id(V) when is_atom(V) ->
+    atom_to_list(V);
+fmt_id(V) when is_list(V); is_binary(V) ->
+    V.
+
+init_chart(_K, #{type := Type, id := Id, values := Values} = Def, Interval, Acc) ->
     C0 = lists:map(fun({K, Default}) ->
 			   fmt(maps:get(K, Def, Default));
 		      (K) ->
@@ -209,27 +228,28 @@ init_chart(#{type := Type, id := Id, values := Values} = Def, Interval, Acc) ->
 		    {family, Id}, {context, "Erlang"},
 		    charttype, priority,
 		    {update_every, Interval}]),
-    Chart = string:join(["CHART", [fmt(Type), $., fmt(Id)] | C0], " "),
+    Chart = string:join(["CHART", [fmt_id(Type), $., fmt_id(Id)] | C0], " "),
     lists:foldl(fun(V, A) -> init_chart_values(V, A) end, [Chart | Acc], Values).
 
-init_chart_values(Value, Acc) ->
+init_chart_values(#{id := Id} = Value, Acc) ->
     V0 = lists:map(fun(K) -> fmt(maps:get(K, Value, undefined)) end,
-		   [id, name, algorithm, multiplier, divisor, hidden]),
-    [string:join(["DIMENSION" | V0], " ") | Acc].
+		   [name, algorithm, multiplier, divisor, hidden]),
+    [string:join(["DIMENSION", fmt_id(Id) | V0], " ") | Acc].
 
 
-report_chart_values(#{id := Id, get := Get}, Value, Acc) ->
-    Set = ["SET ", fmt(Id), " = ", fmt(Get(Id, Value))],
+report_chart_values(#{id := Id, identifier := Ident, get := Get}, Value, Acc) ->
+    Set = ["SET ", fmt_id(Id), " = ", fmt(Get(Ident, Value))],
     [Set | Acc].
 
-report_chart(#{type := Type, id := Id, values := Values, init := Init} = Report,
+report_chart(_K, #{type := Type, id := Id, identifier := Ident,
+		   values := Values, init := Init} = Report,
 	     Interval, Acc0) ->
     Begin = if is_integer(Interval) ->
-		    ["BEGIN ", fmt(Type) , $., fmt(Id), " ", fmt(Interval)];
+		    ["BEGIN ", fmt_id(Type) , $., fmt_id(Id), " ", fmt(Interval)];
 	       true ->
-		    ["BEGIN ", fmt(Type) , $., fmt(Id)]
+		    ["BEGIN ", fmt_id(Type) , $., fmt_id(Id)]
 	    end,
-    Value = Init(maps:get(value, Report, undefined)),
+    Value = Init(Ident, maps:get(value, Report, undefined)),
     Acc = lists:foldl(report_chart_values(_, Value, _), [Begin | Acc0], Values),
     {Report#{value => Value}, ["END" | Acc]}.
 
@@ -237,15 +257,18 @@ report_chart(#{type := Type, id := Id, values := Values, init := Init} = Report,
 %%% default system charts
 %%%===================================================================
 
+erlang_simple_stats(Id, _Last) ->
+    erlang:statistics(Id).
+
 init(active_tasks, State) ->
     Value = #{algorithm => absolute, get => fun({_, Id}, Tasks) -> lists:nth(Id, Tasks) end},
     Values = [Value#{id => {active_tasks, Id}} ||
-		 Id <- lists:seq(1, erlang:system_info(schedulers))], 
+		 Id <- lists:seq(1, erlang:system_info(schedulers))],
     Chart = #{type   => erlang, id => active_tasks,
 	      title  => "Active Tasks",
 	      units  => "number",
 	      values => Values,
-	      init   => fun(_) -> erlang:statistics(active_tasks) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -255,7 +278,7 @@ init(context_switches, State) ->
 	      units  => "number",
 	      values => [#{id => context_switches, algorithm => incremental,
 			   get => fun(_, {ContextSwitches, _}) -> ContextSwitches end}],
-	      init   => fun(_) -> erlang:statistics(context_switches) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -266,24 +289,24 @@ init(exact_reductions, State) ->
 	      values => [#{id => exact_reductions, algorithm => incremental,
 			   get => fun(_, {TotalExactReductions, _ExactReductionsSinceLastCall}) ->
 					  TotalExactReductions end}],
-	      init => fun(_) -> erlang:statistics(exact_reductions) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
 init(garbage_collection, State0) ->
-    Chart1 = #{type   => erlang, id => number_of_gcs,
+    Chart1 = #{type   => erlang, id => number_of_gcs, identifier => garbage_collection,
 	       title  => "Number of Garbage Collection",
 	       units  => "number",
 	       values => [#{id => number_of_gcs, algorithm => incremental,
 			    get => fun(_, {NumberofGCs, _, _}) -> NumberofGCs end}],
-	       init   => fun(_) -> erlang:statistics(garbage_collection) end
+	       init   => fun erlang_simple_stats/2
 	      },
-    Chart2 = #{type   => erlang, id => words_reclaimed,
+    Chart2 = #{type   => erlang, id => words_reclaimed, identifier => garbage_collection,
 	       title  => "Words Reclaimed",
 	       units  => "number",
 	       values => [#{id => words_reclaimed, algorithm => incremental,
 			    get => fun(_, {_, WordsReclaimed, _}) -> WordsReclaimed end}],
-	       init   => fun(_) -> erlang:statistics(garbage_collection) end
+	       init   => fun erlang_simple_stats/2
 	      },
     State = register_chart(Chart1, State0),
     register_chart(Chart2, State);
@@ -296,7 +319,7 @@ init(io, State) ->
 			   get => fun(_, {{input, Input}, _}) -> Input end},
 			 #{id => output, algorithm => incremental,
 			   get => fun(_, {_, {output, Output}}) -> Output end}],
-	      init   => fun(_) -> erlang:statistics(io) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -307,7 +330,7 @@ init(reductions, State) ->
 	      values => [#{id  => reductions, algorithm => incremental,
 			   get => fun(_, {TotalReductions, _ReductionsSinceLastCall}) ->
 					  TotalReductions end}],
-	      init   => fun(_) -> erlang:statistics(reductions) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -317,19 +340,19 @@ init(run_queue, State) ->
 	      units  => "number",
 	      values => [#{id => run_queue, algorithm => absolute,
 			   get => fun(_, RunQueue) -> RunQueue end}],
-	      init   => fun(_) -> erlang:statistics(run_queue) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
 init(run_queue_lengths, State) ->
     Value = #{algorithm => absolute, get => fun({_, Id}, Lengths) -> lists:nth(Id, Lengths) end},
     Values = [Value#{id => {run_queue_lengths, Id}} ||
-		 Id <- lists:seq(1, erlang:system_info(schedulers))], 
+		 Id <- lists:seq(1, erlang:system_info(schedulers))],
     Chart = #{type   => erlang, id => run_queue_lengths,
 	      title  => "Run Queue Length",
 	      units  => "number",
 	      values => Values,
-	      init   => fun(_) -> erlang:statistics(run_queue_lengths) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -340,7 +363,7 @@ init(runtime, State) ->
 	      values => [#{id => runtime, algorithm => incremental,
 			   get => fun(_, {TotalRunTime, _TimeSinceLastCall}) ->
 					  TotalRunTime end}],
-	      init   => fun(_) -> erlang:statistics(runtime) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -354,12 +377,12 @@ init(scheduler_wall_time, State) ->
 	  end,
     Value = #{algorithm => incremental, get => Get},
     Values = [Value#{id => {scheduler_wall_time, Id}} ||
-		 Id <- lists:seq(1, erlang:system_info(schedulers))], 
+		 Id <- lists:seq(1, erlang:system_info(schedulers))],
     Chart = #{type   => erlang, id => scheduler_wall_time,
 	      title  => "Wall Time",
 	      units  => "number",
 	      values => Values,
-	      init   => fun(_) -> erlang:statistics(scheduler_wall_time) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -369,7 +392,7 @@ init(total_active_tasks, State) ->
 	      units  => "number",
 	      values => [#{id => total_active_tasks, algorithm => absolute,
 			   get => fun(_, ActiveTasks) -> ActiveTasks end}],
-	      init   => fun(_) -> erlang:statistics(total_active_tasks) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -379,7 +402,7 @@ init(total_run_queue_lengths, State) ->
 	      units  => "number",
 	      values => [#{id => total_run_queue_lengths, algorithm => absolute,
 			   get => fun(_, TotalRunQueueLenghts) -> TotalRunQueueLenghts end}],
-	      init   => fun(_) -> erlang:statistics(total_run_queue_lengths) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
@@ -390,7 +413,7 @@ init(wall_clock, State) ->
 	      values => [#{id => wall_clock, algorithm => incremental,
 			   get => fun(_, {TotalWallclockTime, _WallclockTimeSinceLastCall}) ->
 					  TotalWallclockTime end}],
-	      init   => fun(_) -> erlang:statistics(wall_clock) end
+	      init   => fun erlang_simple_stats/2
 	     },
     register_chart(Chart, State);
 
