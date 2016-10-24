@@ -25,7 +25,7 @@
 -compile([{parse_transform, cut}]).
 
 %% API
--export([start_link/0]).
+-export([start_link/0, register_chart/1]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3, code_change/4]).
@@ -35,7 +35,14 @@
 -define(DEFAULT_TIMEOUT, 2).
 -define(MAX_TIMEOUT, 30).
 
--record(state, {charts, timer, timeout, interval, last, socket}).
+-record(state, {charts	= #{}			:: map(),
+		updated = false			:: 'true' | 'false',
+		timer				:: 'undefined' | reference(),
+		timeout = ?DEFAULT_TIMEOUT	:: integer(),
+		interval			:: 'undefined' | integer(),
+		last				:: 'undefined' | integer(),
+		socket				:: 'undefined' | port()
+	       }).
 
 -define(STATISTICS, [active_tasks, context_switches, exact_reductions, garbage_collection,
 		     io, reductions, run_queue, run_queue_lengths, runtime, scheduler_wall_time,
@@ -45,12 +52,19 @@
 %%% API
 %%%===================================================================
 
--spec start_link() ->
-			{ok, Pid :: pid()} |
-			ignore |
-			{error, Error :: term()}.
+-spec start_link() -> {ok, Pid :: pid()} |
+		      ignore |
+		      {error, Error :: term()}.
 start_link() ->
     gen_statem:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+register_chart(Chart) ->
+    case erlang:whereis(?SERVER) of
+	Pid when is_pid(Pid) ->
+	    gen_statem:call(Pid, {register, Chart});
+	_ ->
+	    {error, not_running}
+    end.
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -66,7 +80,7 @@ callback_mode() -> state_functions.
 		  ignore |
 		  {stop, Reason :: term()}.
 init([]) ->
-    State0 = #state{charts = [], timeout = ?DEFAULT_TIMEOUT},
+    State0 = #state{charts = #{}, timeout = ?DEFAULT_TIMEOUT},
     State = lists:foldl(fun init/2, State0, ?STATISTICS),
     {ok, connect, State, [{next_event, internal, reconnect}]}.
 
@@ -86,14 +100,24 @@ connect(Type, reconnect, #state{timeout = TimeOut} = Data)
 	    TRef = erlang:send_after(TimeOut * 1000, self(), reconnect),
 	    NextTimeOut = min(?MAX_TIMEOUT, TimeOut * 2),
 	    {keep_state, Data#state{timeout = NextTimeOut, timer = TRef}}
-    end.
+    end;
+
+connect({call, From}, {register, Chart}, Data0) ->
+    Data = register_chart(Chart, Data0),
+    {keep_state, Data, [{reply, From, ok}]}.
 
 -spec reporting(
 	gen_statem:event_type(), Msg :: term(),
 	Data :: term()) ->
 			gen_statem:state_function_result().
-reporting(Type, report, #state{charts = ChartsIn, interval = Interval, socket = Socket, last = Last} = Data)
+reporting(Type, report, #state{charts = ChartsIn, updated = Updated, interval = Interval,
+			       socket = Socket, last = Last} = Data0)
   when Type == internal; Type == info ->
+
+    Data = if Updated -> send_chart_definition(Data0);
+	      true    -> Data0
+    end,
+
     Now = erlang:monotonic_time(microsecond),
     TDiff = if is_integer(Last) -> Now - Last;
 	       true             -> undefined
@@ -104,13 +128,11 @@ reporting(Type, report, #state{charts = ChartsIn, interval = Interval, socket = 
     TRef = erlang:send_after(Interval, self(), report),
     {keep_state, Data#state{charts = ChartsOut, timer = TRef, last = Now}};
 
-reporting(info, {tcp, Socket, Msg}, #state{charts = Charts, socket = Socket} = Data) ->
+reporting(info, {tcp, Socket, Msg}, #state{socket = Socket} = Data0) ->
     case io_lib:fread("START ~d", Msg) of
 	{ok, [Interval], _} ->
-	    Init = init_report(Interval, Charts),
-	    gen_tcp:send(Socket, Init),
-
-	    {keep_state, Data#state{interval = Interval * 1000}, [{next_event, internal, report}]};
+	    Data = send_chart_definition(Data0#state{interval = Interval * 1000}),
+	    {keep_state, Data, [{next_event, internal, report}]};
 	_Other ->
 	    keep_state_and_data
     end;
@@ -120,6 +142,11 @@ reporting(info, {tcp_closed, _Socket}, Data) ->
 reporting(info, {tcp_error, _Socket, _Reason}, Data) ->
     cancel_timer(Data),
     {next_state, connect, Data#state{timeout = ?DEFAULT_TIMEOUT, socket = undefined}, [{next_event, internal, reconnect}]};
+
+reporting({call, From}, {register, Chart}, Data0) ->
+    Data = register_chart(Chart, Data0),
+    {keep_state, Data, [{reply, From, ok}]};
+
 reporting(_Type, _Msg, _Data) ->
     keep_state_and_data.
 
@@ -150,6 +177,20 @@ cancel_timer(#state{timer = TRef}) when is_reference(TRef) ->
     end;
 cancel_timer(_) ->
     false.
+
+%% Fun = fun(K, V1, AccIn) -> {V2, AccOut})
+
+maps_mapfold(Fun, Init, Map) when is_function(Fun,3), is_map(Map) ->
+    {L,A} = lists:mapfoldl(fun({K,V1},AccIn) ->
+				   {V2, AccOut} = Fun(K,V1,AccIn),
+				   {{K,V2}, AccOut}
+			   end, Init, maps:to_list(Map)),
+    {maps:from_list(L), A}.
+
+send_chart_definition(#state{charts = Charts, interval = Interval, socket = Socket} = Data) ->
+    Init = init_report(Interval div 1000, Charts),
+    gen_tcp:send(Socket, Init),
+    Data#state{updated = false}.
 
 -define(DEFAULT_CHART, #{type         => undefined,
 			 id           => undefined,
